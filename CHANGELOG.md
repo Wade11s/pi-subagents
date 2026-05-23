@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - Unreleased
+
+### Changed
+- Personal fork setup with Wade-maintained repository metadata.
 
 ### Fixed
 - **`.pi/subagent-schedules/` is no longer created in every working directory.** `ScheduleStore`'s constructor previously ran `mkdirSync` unconditionally, so any session with scheduling enabled left an empty `.pi/subagent-schedules/` dir behind even when nothing was ever scheduled. Directory creation is now lazy — deferred to a new private `ensureDir()` invoked at the top of `withLock`, so the dir (and its `<sessionId>.json`) appear only when a job is actually persisted. Additionally, `update`/`remove` now short-circuit on an unknown id (in-memory `jobs.has(id)` check) before taking the lock, so no-op mutations never touch disk. Read-only use (`list`/`get`/`hasName`) and constructing the store never create the dir. Pre-existing leftover dirs are not cleaned up — remove them manually.

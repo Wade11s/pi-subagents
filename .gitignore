@@ -27,6 +27,15 @@ Thumbs.db
 # Temporary files
 *.tmp
 .temp/
+
+# Pi runtime state
 .pi/readcache
+.pi/subagents.json
+.pi/subagent-schedules/
+.pi/subagent-memory.local.md
+.pi/subagent-memory.user.md
+.pi/subagent-output/
+.pi/subagent-sessions/
+
 .claude
 .vscode

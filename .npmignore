@@ -5,9 +5,12 @@ tsconfig.json
 .gitignore
 
 # Documentation
+AGENTS.md
+CONTEXT-MAP.md
 PLAN.md
 SUMMARY.md
 plan/
+docs/
 media/
 
 # Build artifacts
@@ -22,7 +25,9 @@ tests/
 *.spec.ts
 
 .pi
+.agents
 .claude
 .vscode
 .github/
 biome.json
+skills-lock.json
