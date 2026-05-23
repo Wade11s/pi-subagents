@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
 
 /** Simple in-process event bus for testing. */
@@ -21,13 +24,34 @@ describe("cross-extension RPC", () => {
   let manager: SpawnCapable;
   let ctx: object | undefined;
   let deps: RpcDeps;
+  let tmpDirs: string[] = [];
+  let oldAgentDir: string | undefined;
 
   beforeEach(() => {
+    oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+    tmpDirs = [];
+    const agentDir = mkdtempSync(join(tmpdir(), "rpc-agent-"));
+    tmpDirs.push(agentDir);
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     events = createEventBus();
     manager = { spawn: vi.fn().mockReturnValue("agent-42"), abort: vi.fn().mockReturnValue(true) };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
   });
+
+  afterEach(() => {
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeScopedCwd(enabledModels: string[]): string {
+    const cwd = mkdtempSync(join(tmpdir(), "rpc-scope-"));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ enabledModels }, null, 2));
+    return cwd;
+  }
 
   // --- ping ---
 
@@ -314,6 +338,57 @@ describe("cross-extension RPC", () => {
       const call = (reply as ReturnType<typeof vi.fn>).mock.calls[0][0];
       expect(call.success).toBe(false);
       expect(call.error).toMatch(/modelRegistry is unavailable/);
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("requires explicit model for RPC spawn when scoped settings exist", async () => {
+      ctx = { session: true, cwd: makeScopedCwd(["openai-codex/gpt-5.5"]), modelRegistry: registry };
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-m5", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-m5", type: "general-purpose", prompt: "x",
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      const call = (reply as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(call.success).toBe(false);
+      expect(call.error).toMatch(/no model was selected/);
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("resolves RPC model strings within scoped settings", async () => {
+      ctx = { session: true, cwd: makeScopedCwd(["openai-codex/gpt-5.5"]), modelRegistry: registry };
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-m6", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-m6", type: "general-purpose", prompt: "x",
+        options: { model: "gpt" },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "x",
+        { model: fakeModel },
+      );
+    });
+
+    it("rejects RPC model strings outside scoped settings", async () => {
+      ctx = { session: true, cwd: makeScopedCwd(["openai-codex/gpt-5.5"]), modelRegistry: registry };
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-m7", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-m7", type: "general-purpose", prompt: "x",
+        options: { model: "anthropic/claude-sonnet-4-6" },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      const call = (reply as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(call.success).toBe(false);
+      expect(call.error).toMatch(/outside the scoped model set/);
       expect(manager.spawn).not.toHaveBeenCalled();
     });
   });

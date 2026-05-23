@@ -10,7 +10,7 @@
  *   - Concurrency-bypass option flows through to manager.spawn
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,12 +31,30 @@ function makeMockPi() {
   } as any;
 }
 
-function makeMockCtx() {
+const TEST_MODELS = [
+  { id: "claude-sonnet-4-6", provider: "anthropic", name: "Claude Sonnet 4.6" },
+  { id: "gpt-4o", provider: "openai", name: "GPT-4o" },
+];
+
+function makeRegistry(models = TEST_MODELS) {
   return {
-    cwd: "/tmp",
-    modelRegistry: { find: vi.fn(), getAll: () => [], getAvailable: () => [] },
+    find: vi.fn((provider: string, id: string) => models.find(m => m.provider === provider && m.id === id)),
+    getAll: () => models,
+    getAvailable: () => models,
+  };
+}
+
+function makeMockCtx(cwd = "/tmp", modelRegistry = makeRegistry()) {
+  return {
+    cwd,
+    modelRegistry,
     sessionManager: { getSessionId: () => "sess-1" },
   } as any;
+}
+
+function writeScopedSettings(cwd: string, enabledModels: string[]) {
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ enabledModels }, null, 2));
 }
 
 describe("SubagentScheduler — static format parsers", () => {
@@ -93,6 +111,8 @@ describe("SubagentScheduler — static format parsers", () => {
 
 describe("SubagentScheduler — lifecycle", () => {
   let tmp: string;
+  let agentDir: string;
+  let oldAgentDir: string | undefined;
   let store: ScheduleStore;
   let scheduler: SubagentScheduler;
   let manager: any;
@@ -100,7 +120,10 @@ describe("SubagentScheduler — lifecycle", () => {
   let ctx: any;
 
   beforeEach(() => {
+    oldAgentDir = process.env.PI_CODING_AGENT_DIR;
     tmp = mkdtempSync(join(tmpdir(), "scheduler-test-"));
+    agentDir = mkdtempSync(join(tmpdir(), "scheduler-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     store = new ScheduleStore(join(tmp, "s.json"));
     scheduler = new SubagentScheduler();
     manager = makeMockManager();
@@ -111,7 +134,10 @@ describe("SubagentScheduler — lifecycle", () => {
 
   afterEach(() => {
     scheduler.stop();
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
     rmSync(tmp, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   });
 
   it("isActive() reports start/stop state", () => {
@@ -138,6 +164,24 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(() => scheduler.addJob({
       name: "j1", description: "y", schedule: "2h", subagent_type: "general-purpose", prompt: "p2",
     })).toThrow(/already exists/);
+  });
+
+  it("addJob requires and freezes a scoped model when scoped settings exist", () => {
+    scheduler.stop();
+    writeScopedSettings(tmp, ["anthropic/claude-sonnet-4-6:high"]);
+    scheduler.start(pi, makeMockCtx(tmp), manager, store);
+
+    expect(() => scheduler.addJob({
+      name: "needs-model", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "p",
+    })).toThrow(/no model was selected/);
+
+    const job = scheduler.addJob({
+      name: "with-model", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "p", model: "sonnet",
+    });
+    expect(job.model).toBe("anthropic/claude-sonnet-4-6");
+    expect(job.thinking).toBe("high");
   });
 
   it("removeJob clears the job and emits removed", () => {
@@ -228,6 +272,8 @@ describe("SubagentScheduler — lifecycle", () => {
 
 describe("SubagentScheduler — fire path", () => {
   let tmp: string;
+  let agentDir: string;
+  let oldAgentDir: string | undefined;
   let store: ScheduleStore;
   let scheduler: SubagentScheduler;
   let manager: any;
@@ -235,8 +281,11 @@ describe("SubagentScheduler — fire path", () => {
   let ctx: any;
 
   beforeEach(() => {
+    oldAgentDir = process.env.PI_CODING_AGENT_DIR;
     vi.useFakeTimers();
     tmp = mkdtempSync(join(tmpdir(), "scheduler-fire-"));
+    agentDir = mkdtempSync(join(tmpdir(), "scheduler-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     store = new ScheduleStore(join(tmp, "s.json"));
     scheduler = new SubagentScheduler();
     manager = makeMockManager();
@@ -248,7 +297,10 @@ describe("SubagentScheduler — fire path", () => {
   afterEach(() => {
     scheduler.stop();
     vi.useRealTimers();
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
     rmSync(tmp, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   });
 
   it("interval jobs fire repeatedly via setInterval", () => {
@@ -312,6 +364,27 @@ describe("SubagentScheduler — fire path", () => {
     vi.advanceTimersByTime(2_000);
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
       type: "fired", name: "fire-once", agentId: expect.stringMatching(/^agent-/),
+    }));
+  });
+
+  it("skips scheduled fire when stored model is outside current scoped settings", () => {
+    scheduler.stop();
+    writeScopedSettings(tmp, ["anthropic/claude-sonnet-4-6"]);
+    scheduler.start(pi, makeMockCtx(tmp), manager, store);
+    const job = scheduler.addJob({
+      name: "scope-skip", description: "x", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "x", model: "sonnet",
+    });
+
+    writeScopedSettings(tmp, ["openai/gpt-4o"]);
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).not.toHaveBeenCalled();
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error",
+      jobId: job.id,
+      error: expect.stringMatching(/outside current scoped model set/),
     }));
   });
 

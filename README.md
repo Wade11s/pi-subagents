@@ -212,7 +212,7 @@ All fields are optional — sensible defaults for everything.
 | `isolated` | `false` | No extension/MCP tools, only built-in |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
+Frontmatter strategy fields are authoritative for `max_turns`, `inherit_context`, `run_in_background`, `isolated`, and `isolation`. `model` and `thinking` are preferred defaults: explicit `Agent` parameters override them, and when pi scoped models are configured the caller must choose a model from that scoped list. A scoped model entry's `thinkingLevel` is used unless `Agent.thinking` explicitly overrides it.
 
 ## Tools
 
@@ -225,7 +225,7 @@ Launch a sub-agent.
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
-| `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
+| `model` | string | no* | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). *Required at runtime when scoped models are configured; use `list_scoped_models` first. |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Run without blocking |
@@ -233,6 +233,10 @@ Launch a sub-agent.
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"worktree"` | no | Run in an isolated git worktree |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
+
+### `list_scoped_models`
+
+Return pretty JSON describing the model list the parent agent should choose from before spawning sub-agents: `source`, `hardBoundary`, `requiresExplicitModel`, `models`, `guidance`, and `warnings`. When `hardBoundary` is true, `Agent.model` must be one of `models[].id` and models outside the list are rejected.
 
 ### `get_subagent_result`
 
@@ -410,7 +414,7 @@ pi.events.emit("subagents:rpc:spawn", {
 });
 ```
 
-`options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context.
+`options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context. If scoped models are configured, RPC spawns follow the same hard boundary as the `Agent` tool: `options.model` is required and must resolve inside the scoped list.
 
 ### Stop
 

@@ -10,6 +10,7 @@
  */
 
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { canonicalModelId, formatScopedModelError, getScopedModelListing, resolveModelWithinScopedListing } from "./scoped-models.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
 export interface EventBus {
@@ -91,21 +92,37 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
       // agent's auth lookup doesn't crash with "No API key found for
       // undefined".
       let normalizedOptions = options ?? {};
-      if (typeof normalizedOptions.model === "string") {
-        const registry = (ctx as { modelRegistry?: ModelRegistry }).modelRegistry;
-        if (!registry) {
+      const registry = (ctx as { modelRegistry?: ModelRegistry }).modelRegistry;
+      if (!registry) {
+        if (typeof normalizedOptions.model === "string") {
           throw new Error(
             `Model override "${normalizedOptions.model}" provided but ctx.modelRegistry is unavailable`,
           );
         }
-        const resolved = resolveModel(normalizedOptions.model, registry);
-        if (typeof resolved === "string") {
-          // resolveModel returns a human-readable error string when the
-          // input doesn't match any available model. Surface it instead of
-          // silently falling back so the caller sees the auth/typo issue.
-          throw new Error(resolved);
+      } else {
+        const scopedListing = getScopedModelListing(ctx as any);
+        if (scopedListing.hardBoundary) {
+          if (!normalizedOptions.model) throw new Error(formatScopedModelError(undefined, scopedListing));
+          if (typeof normalizedOptions.model === "string") {
+            const scoped = resolveModelWithinScopedListing(normalizedOptions.model, scopedListing);
+            if (typeof scoped === "string") throw new Error(scoped);
+            normalizedOptions = { ...normalizedOptions, model: scoped.model };
+          } else {
+            const id = canonicalModelId(normalizedOptions.model);
+            if (!id || !scopedListing.models.some(entry => entry.id === id)) {
+              throw new Error(formatScopedModelError(id, scopedListing));
+            }
+          }
+        } else if (typeof normalizedOptions.model === "string") {
+          const resolved = resolveModel(normalizedOptions.model, registry);
+          if (typeof resolved === "string") {
+            // resolveModel returns a human-readable error string when the
+            // input doesn't match any available model. Surface it instead of
+            // silently falling back so the caller sees the auth/typo issue.
+            throw new Error(resolved);
+          }
+          normalizedOptions = { ...normalizedOptions, model: resolved };
         }
-        normalizedOptions = { ...normalizedOptions, model: resolved };
       }
 
       return { id: manager.spawn(pi, ctx, type, prompt, normalizedOptions) };

@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -65,9 +68,21 @@ function makeHeadlessCtx() {
 }
 
 describe("print mode background notifications", () => {
+  let agentDir: string;
+  let oldAgentDir: string | undefined;
+
+  beforeEach(() => {
+    oldAgentDir = process.env.PI_CODING_AGENT_DIR;
+    agentDir = mkdtempSync(join(tmpdir(), "print-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
+    rmSync(agentDir, { recursive: true, force: true });
   });
 
   it("ignores stale-context errors from delayed completion nudges", async () => {

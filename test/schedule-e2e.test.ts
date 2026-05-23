@@ -70,18 +70,26 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1500): Promise<void
 
 describe("SubagentScheduler — end-to-end with real timers", () => {
   let tmp: string;
+  let agentDir: string;
+  let oldAgentDir: string | undefined;
   let store: ScheduleStore;
   let scheduler: SubagentScheduler;
 
   beforeEach(() => {
+    oldAgentDir = process.env.PI_CODING_AGENT_DIR;
     tmp = mkdtempSync(join(tmpdir(), "schedule-e2e-"));
+    agentDir = mkdtempSync(join(tmpdir(), "schedule-e2e-agent-"));
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     store = new ScheduleStore(join(tmp, "schedules.json"));
     scheduler = new SubagentScheduler();
   });
 
   afterEach(() => {
     scheduler.stop();
+    if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
     rmSync(tmp, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
   });
 
   it("one-shot job: real setTimeout fires, agent runs, store reflects success", async () => {

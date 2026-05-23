@@ -26,6 +26,7 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
+import { canonicalModelId, getScopedModelListing, resolveSubagentModelSelection, serializeScopedModelListing } from "./scoped-models.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
@@ -616,6 +617,21 @@ export default function (pi: ExtensionAPI) {
     (event, payload) => pi.events.emit(event, payload),
   );
 
+  // ---- list_scoped_models tool ----
+
+  pi.registerTool(defineTool({
+    name: "list_scoped_models",
+    label: "List Scoped Models",
+    description:
+      "List the models the parent agent should choose from before spawning sub-agents. " +
+      "Returns pretty JSON with source, hardBoundary, requiresExplicitModel, models, guidance, and warnings. " +
+      "If hardBoundary is true, call Agent with model set to one models[].id from this list.",
+    parameters: Type.Object({}),
+    execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+      return textResult(serializeScopedModelListing(getScopedModelListing(ctx)));
+    },
+  }));
+
   // ---- Agent tool ----
 
   // Schedule param + its guideline are gated on `schedulingEnabled` (read once
@@ -660,8 +676,13 @@ Guidelines:
 - Use run_in_background for work you don't need immediately. You will be notified when it completes.
 - Use resume with an agent ID to continue a previous agent's work.
 - Use steer_subagent to send mid-run messages to a running background agent.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.
+- Model selection with scoped models:
+  1. If the user specified a model, call list_scoped_models first and verify it appears in the returned models list before passing it as model.
+  2. If the user did not specify a model and list_scoped_models returns requiresExplicitModel: true, choose the best model for the task from models[].id and pass it as model.
+  3. If list_scoped_models returns source: "available-fallback", model is optional.
+  4. Do not pass a model outside the scoped list when hardBoundary is true.
+- Use model to specify the selected model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
+- Use thinking to control extended thinking level; when the selected scoped model has thinkingLevel, it is used unless thinking is explicitly set.
 - Use inherit_context if the agent needs the parent conversation history.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).${scheduleGuideline}`,
     parameters: Type.Object({
@@ -677,7 +698,7 @@ Guidelines:
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). If list_scoped_models returns requiresExplicitModel: true, this must be one of that tool\'s models[].id values.',
         }),
       ),
       thinking: Type.Optional(
@@ -830,28 +851,27 @@ Guidelines:
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
-      if (resolvedConfig.modelInput) {
-        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
-        if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
-        } else {
-          model = resolved;
-        }
-      }
+      const modelSelection = resolveSubagentModelSelection(ctx, {
+        modelParam: params.model as string | undefined,
+        configModel: customConfig?.model,
+        thinkingParam: params.thinking as any,
+        configThinking: customConfig?.thinking,
+        requireExplicitModel: !params.resume,
+      });
+      if (typeof modelSelection === "string") return textResult(modelSelection);
 
-      const thinking = resolvedConfig.thinking;
+      const model = modelSelection.model;
+      const thinking = modelSelection.thinking;
       const inheritContext = resolvedConfig.inheritContext;
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
 
       const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
+      const displayModel = model ?? ctx.model;
+      const effectiveModelId = displayModel?.id;
       const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
+        ? (displayModel?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
         : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
@@ -901,7 +921,7 @@ Guidelines:
             schedule: params.schedule as string,
             subagent_type: subagentType,
             prompt: params.prompt as string,
-            model: params.model as string | undefined,
+            model: canonicalModelId(model),
             thinking: thinking,
             max_turns: effectiveMaxTurns,
             isolated: isolated,

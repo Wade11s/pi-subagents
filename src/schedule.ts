@@ -21,6 +21,7 @@ import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
+import { canonicalModelId, formatScopedModelError, getScopedModelListing, resolveModelWithinScopedListing } from "./scoped-models.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
 /** Event emitted on `pi.events` for cross-extension consumers. */
@@ -118,7 +119,8 @@ export class SubagentScheduler {
     if (store.hasName(input.name)) {
       throw new Error(`A scheduled job named "${input.name}" already exists.`);
     }
-    const job = this.buildJob(input);
+    const jobInput = this.resolveJobModelAtCreate(input);
+    const job = this.buildJob(jobInput);
     store.add(job);
     if (job.enabled) this.scheduleJob(job);
     this.emit({ type: "added", job });
@@ -227,13 +229,29 @@ export class SubagentScheduler {
 
     store.update(id, { lastStatus: "running" });
 
-    // Resolve model at fire time — registry contents may have changed since the
-    // job was created (auth added/removed). Fall back silently to spawn-default
-    // if resolution fails; the spawn path handles undefined model gracefully.
+    // Resolve model at fire time — registry contents or scoped-model settings may
+    // have changed since the job was created. If a scoped model set currently
+    // exists, it is a hard boundary; otherwise fall back to normal availability.
     let resolvedModel: any | undefined;
-    if (job.model) {
+    const scopedListing = getScopedModelListing(ctx);
+    if (scopedListing.hardBoundary) {
+      if (!job.model) {
+        this.markFireError(id, formatScopedModelError(undefined, scopedListing));
+        return;
+      }
+      const scoped = resolveModelWithinScopedListing(job.model, scopedListing);
+      if (typeof scoped === "string") {
+        this.markFireError(id, `Scheduled subagent "${job.name}" skipped: stored model ${job.model} is outside current scoped model set.\n\n${scoped}`);
+        return;
+      }
+      resolvedModel = scoped.model;
+    } else if (job.model) {
       const r = resolveModel(job.model, ctx.modelRegistry);
-      if (typeof r !== "string") resolvedModel = r;
+      if (typeof r === "string") {
+        this.markFireError(id, r);
+        return;
+      }
+      resolvedModel = r;
     }
 
     let agentId: string;
@@ -284,6 +302,26 @@ export class SubagentScheduler {
       // Spawn returned without a promise (defensive — bypassQueue path always sets one).
       finalize("success");
     }
+  }
+
+  private resolveJobModelAtCreate(input: NewJobInput): NewJobInput {
+    const ctx = this.ctx;
+    if (!ctx) return input;
+    const scopedListing = getScopedModelListing(ctx);
+    if (!scopedListing.hardBoundary) return input;
+    if (!input.model) throw new Error(formatScopedModelError(undefined, scopedListing));
+    const scoped = resolveModelWithinScopedListing(input.model, scopedListing);
+    if (typeof scoped === "string") throw new Error(scoped);
+    return {
+      ...input,
+      model: canonicalModelId(scoped.model),
+      thinking: input.thinking ?? scoped.entry.thinkingLevel,
+    };
+  }
+
+  private markFireError(jobId: string, error: string): void {
+    this.store?.update(jobId, { lastRun: new Date().toISOString(), lastStatus: "error" });
+    this.emit({ type: "error", jobId, error });
   }
 
   private emit(event: ScheduleChangeEvent): void {
