@@ -394,7 +394,9 @@ export async function runAgent(
     cleanupAbort();
   }
 
-  const responseText = collector.getText().trim() || getLastAssistantText(session);
+  // Prefer getLastAssistantText (complete content from session history) over
+  // collector.getText() (which may only have the steered summary).
+  const responseText = getLastAssistantText(session) || collector.getText().trim();
   return { responseText, session, aborted, steered: softLimitReached };
 }
 
