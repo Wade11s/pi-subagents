@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { createAgentConfig, validateAgentConfig } from "./agent-config-validation.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
@@ -24,6 +25,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { RuntimeAgentRegistry } from "./runtime-agent-registry.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { canonicalModelId, getScopedModelListing, resolveSubagentModelSelection, serializeScopedModelListing } from "./scoped-models.js";
@@ -372,6 +374,9 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
+  // Runtime agent registry for dynamically created agents
+  const runtimeRegistry = new RuntimeAgentRegistry();
+
   // Background completion: route through group join or send individual nudge
   const manager = new AgentManager((record) => {
     // Emit lifecycle event based on terminal status
@@ -498,6 +503,7 @@ export default function (pi: ExtensionAPI) {
     delete (globalThis as any)[MANAGER_KEY];
     scheduler.stop();
     manager.abortAll();
+    runtimeRegistry.clearAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     manager.dispose();
@@ -631,6 +637,200 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
       return textResult(serializeScopedModelListing(getScopedModelListing(ctx)));
+    },
+  }));
+
+  // ---- create_agent tool ----
+
+  pi.registerTool(defineTool({
+    name: "create_agent",
+    label: "Create Agent",
+    description:
+      "Create a custom subagent at runtime. The agent is immediately available via Agent tool. " +
+      "By default, the agent is temporary (cleared on session end). Use persist=true to save to file.",
+    parameters: Type.Object({
+      name: Type.String({
+        description: "Agent name (alphanumeric + hyphens, no spaces).",
+      }),
+      description: Type.String({
+        description: "One-line description shown in UI.",
+      }),
+      system_prompt: Type.String({
+        description: "System prompt instructions for the agent.",
+      }),
+      tools: Type.Optional(
+        Type.String({
+          description: 'Comma-separated tool names, "all", or "none". Default: "all".',
+        }),
+      ),
+      model: Type.Optional(
+        Type.String({
+          description: 'Model as "provider/modelId". Omit to inherit parent model.',
+        }),
+      ),
+      thinking: Type.Optional(
+        Type.String({
+          description: "Thinking level: off, minimal, low, medium, high, xhigh.",
+        }),
+      ),
+      max_turns: Type.Optional(
+        Type.Number({
+          description: "Maximum agentic turns. 0 or omit for unlimited.",
+          minimum: 0,
+        }),
+      ),
+      prompt_mode: Type.Optional(
+        Type.String({
+          description: '"replace" (full custom prompt) or "append" (add to default). Default: "replace".',
+        }),
+      ),
+      extensions: Type.Optional(
+        Type.Union([Type.Boolean(), Type.String()], {
+          description: 'true (inherit all), false (none), or comma-separated names. Default: true.',
+        }),
+      ),
+      skills: Type.Optional(
+        Type.Union([Type.Boolean(), Type.String()], {
+          description: 'true (inherit all), false (none), or comma-separated names. Default: true.',
+        }),
+      ),
+      disallowed_tools: Type.Optional(
+        Type.String({
+          description: "Comma-separated tool names to block.",
+        }),
+      ),
+      inherit_context: Type.Optional(
+        Type.Boolean({
+          description: "Fork parent conversation into agent. Default: false.",
+        }),
+      ),
+      run_in_background: Type.Optional(
+        Type.Boolean({
+          description: "Run in background by default. Default: false.",
+        }),
+      ),
+      isolated: Type.Optional(
+        Type.Boolean({
+          description: "No extension/MCP tools, only built-in. Default: false.",
+        }),
+      ),
+      memory: Type.Optional(
+        Type.String({
+          description: 'Memory scope: "user", "project", or "local". Omit for none.',
+        }),
+      ),
+      isolation: Type.Optional(
+        Type.String({
+          description: '"worktree" for isolated git worktree. Omit for normal.',
+        }),
+      ),
+      persist: Type.Optional(
+        Type.Boolean({
+          description: "Save agent to file. Default: false (temporary).",
+        }),
+      ),
+      persist_location: Type.Optional(
+        Type.String({
+          description: '"project" or "global". Required if persist=true.',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      // Validate configuration
+      const validation = validateAgentConfig(params);
+      if (!validation.valid) {
+        return textResult(`Failed to create agent: ${validation.error}`);
+      }
+
+      // Check for conflicts with built-in agents
+      const builtInAgents = new Set(["general-purpose", "explore", "plan"]);
+      if (builtInAgents.has(params.name.toLowerCase())) {
+        return textResult(
+          `Failed to create agent: Agent "${params.name}" is a built-in agent.\n` +
+          `Choose a different name.`
+        );
+      }
+
+      // Check for conflicts with existing runtime agents
+      if (runtimeRegistry.has(params.name)) {
+        return textResult(
+          `Failed to create agent: Agent "${params.name}" already exists in runtime registry.\n` +
+          `Choose a different name.`
+        );
+      }
+
+      // Create config
+      const config = createAgentConfig(params);
+
+      // Register in runtime registry
+      try {
+        runtimeRegistry.register(config);
+      } catch (err) {
+        return textResult(
+          `Failed to create agent: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      // Persist if requested
+      if (params.persist) {
+        if (!params.persist_location) {
+          runtimeRegistry.unregister(params.name);
+          return textResult(
+            "Failed to create agent: persist_location is required when persist=true.\n" +
+            'Use "project" or "global".'
+          );
+        }
+
+        const { generateFrontmatter } = await import("./agent-config-validation.js");
+        const frontmatter = generateFrontmatter(config);
+        const content = `---\n${frontmatter}\n---\n\n${config.systemPrompt}\n`;
+
+        let targetDir: string;
+        if (params.persist_location === "project") {
+          targetDir = join(process.cwd(), ".pi", "agents");
+        } else if (params.persist_location === "global") {
+          targetDir = join(getAgentDir(), "agents");
+        } else {
+          runtimeRegistry.unregister(params.name);
+          return textResult(
+            'Failed to create agent: persist_location must be "project" or "global".'
+          );
+        }
+
+        try {
+          mkdirSync(targetDir, { recursive: true });
+          const filePath = join(targetDir, `${config.name}.md`);
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(filePath, content, "utf-8");
+
+          // Reload custom agents to pick up the new file
+          reloadCustomAgents();
+        } catch (err) {
+          runtimeRegistry.unregister(params.name);
+          return textResult(
+            `Failed to persist agent: ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+
+      // Build success response
+      const tools = config.builtinToolNames?.join(", ") ?? "all";
+      const model = config.model ?? "inherited";
+      const persistInfo = params.persist
+        ? `Persisted: ${params.persist_location} (${join(
+            params.persist_location === "project" ? ".pi/agents" : join(getAgentDir(), "agents"),
+            `${config.name}.md`
+          )})\n`
+        : "";
+
+      return textResult(
+        `Agent "${config.name}" created successfully.\n` +
+        `Type: ${config.name}\n` +
+        `Tools: ${tools}\n` +
+        `Model: ${model}\n` +
+        persistInfo +
+        `\nUse Agent tool with subagent_type: "${config.name}" to invoke it.`
+      );
     },
   }));
 
