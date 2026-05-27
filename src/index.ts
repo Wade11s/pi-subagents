@@ -141,6 +141,8 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
   const contextPercent = getSessionContextPercent(record.session);
   const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
   const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
+  const { modelName: modelDisplayName } = buildInvocationTags(record.invocation);
+  const modelXml = modelDisplayName ? `<model>${escapeXml(modelDisplayName)}</model>` : "";
 
   const resultPreview = record.result
     ? record.result.length > resultMaxLen
@@ -156,7 +158,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
-    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
+    `<usage>${modelXml}<total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join('\n');
 }
@@ -870,12 +872,14 @@ Guidelines:
       const parentModelId = ctx.model?.id;
       const displayModel = model ?? ctx.model;
       const effectiveModelId = displayModel?.id;
-      const modelName = effectiveModelId && effectiveModelId !== parentModelId
+      const isInherited = !model || effectiveModelId === parentModelId;
+      const modelName = effectiveModelId
         ? (displayModel?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
         : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName,
+        inherited: isInherited,
         thinking,
         // Explicit value only — the default fallback would just add noise.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
@@ -999,7 +1003,7 @@ Guidelines:
           record.joinMode = joinMode;
           record.toolCallId = toolCallId;
           record.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
-          writeInitialEntry(record.outputFile, id, params.prompt, ctx.cwd);
+          writeInitialEntry(record.outputFile, id, params.prompt, ctx.cwd, modelName, isInherited);
         }
 
         if (joinMode == null || joinMode === 'async') {
@@ -1026,10 +1030,14 @@ Guidelines:
         });
 
         const isQueued = record?.status === "queued";
+        const modelLine = modelName
+          ? `Model: ${modelName}${isInherited ? " (inherited)" : ""}\n`
+          : "";
         return textResult(
           `Agent ${isQueued ? "queued" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
+          modelLine +
           `Description: ${params.description}\n` +
           (record?.outputFile ? `Output file: ${record.outputFile}\n` : "") +
           (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
@@ -1129,6 +1137,7 @@ Guidelines:
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
       const statsParts = [`${record.toolUses} tool uses`];
+      if (modelName) statsParts.push(isInherited ? `${modelName} (inherited)` : modelName);
       if (tokenText) statsParts.push(tokenText);
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
@@ -1180,7 +1189,10 @@ Guidelines:
       const duration = formatDuration(record.startedAt, record.completedAt);
       const tokens = formatLifetimeTokens(record);
       const contextPercent = getSessionContextPercent(record.session);
+      const { modelName: modelDisplayName } = buildInvocationTags(record.invocation);
+
       const statsParts = [`Tool uses: ${record.toolUses}`];
+      if (modelDisplayName) statsParts.push(`Model: ${modelDisplayName}`);
       if (tokens) statsParts.push(tokens);
       if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
       if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);

@@ -165,7 +165,12 @@ export function buildInvocationTags(
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground) tags.push("background");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
-  return { modelName: invocation.modelName, tags };
+  const modelName = invocation.modelName
+    ? invocation.inherited
+      ? `${invocation.modelName} (inherited)`
+      : invocation.modelName
+    : undefined;
+  return { modelName, tags };
 }
 
 /** Truncate text to a single line, max `len` chars. */

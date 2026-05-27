@@ -42,7 +42,7 @@ export function createOutputFilePath(cwd: string, agentId: string, sessionId: st
 }
 
 /** Write the initial user prompt entry. */
-export function writeInitialEntry(path: string, agentId: string, prompt: string, cwd: string): void {
+export function writeInitialEntry(path: string, agentId: string, prompt: string, cwd: string, modelName?: string, inherited?: boolean): void {
   const entry = {
     isSidechain: true,
     agentId,
@@ -50,6 +50,8 @@ export function writeInitialEntry(path: string, agentId: string, prompt: string,
     message: { role: "user", content: prompt },
     timestamp: new Date().toISOString(),
     cwd,
+    ...(modelName && { model: modelName }),
+    ...(inherited !== undefined && { inherited }),
   };
   writeFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
 }

@@ -99,8 +99,10 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Short display name, e.g. "haiku" — always computed when model is available. */
   modelName?: string;
+  /** True when the model is inherited from parent (not explicitly set). */
+  inherited?: boolean;
   thinking?: ThinkingLevel;
   maxTurns?: number;
   isolated?: boolean;
